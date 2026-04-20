@@ -29249,10 +29249,7 @@ window.TU;
           Game = TU.Game,
           InputManager = TU.InputManager,
           AudioManager = TU.AudioManager;
-        // [Phase 1D] __tuGameReadyEvent patch DISABLED - was causing duplicate game:init:post emission.
-        // The canonical emission is in Game.init() at the end of initialization.
-        // All listeners (tileLogic, machines, worker, acid rain) use the single canonical event.
-        if (false && Game && Game.prototype && !Game.prototype.__tuGameReadyEvent) {
+        if (Game && Game.prototype && !Game.prototype.__tuGameReadyEvent) {
           Game.prototype.__tuGameReadyEvent = !0;
           const _init = Game.prototype.init;
           "function" == typeof _init && (Game.prototype.init = async function (...args) {
