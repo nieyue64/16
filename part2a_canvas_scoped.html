@@ -5763,111 +5763,6 @@ window.Events = {
   };
 })();
 // ------------------------------------------
-
-// --- Phase 4A: BlockRegistry with stable IDs and palette mapping ---
-(function() {
-  const TU = window.TU || (window.TU = {});
-
-  // Stable ID assignments for all dynamic blocks.
-  // These IDs are FIXED and MUST NOT change across versions to prevent save corruption.
-  const STABLE_IDS = {
-    WIRE_OFF:   200,
-    WIRE_ON:    201,
-    SWITCH_OFF: 202,
-    SWITCH_ON:  203,
-    LAMP_OFF:   204,
-    LAMP_ON:    205,
-    PUMP_IN:    206,
-    PUMP_OUT:   207,
-    PLATE_OFF:  208,
-    PLATE_ON:   209
-  };
-
-  const _nameToId = new Map();
-  const _idToName = new Map();
-  let _frozen = false;
-
-  // Pre-populate with stable IDs
-  for (const name in STABLE_IDS) {
-    _nameToId.set(name, STABLE_IDS[name]);
-    _idToName.set(STABLE_IDS[name], name);
-  }
-
-  TU.BlockRegistry = {
-    STABLE_IDS: STABLE_IDS,
-
-    /**
-     * Register a dynamic block with a stable ID.
-     * @param {string} name - Block name (e.g. 'PUMP_IN')
-     * @param {number} id - Fixed ID (must be from STABLE_IDS)
-     * @returns {number} The assigned ID
-     */
-    register: function(name, id) {
-      if (_frozen) { console.warn('[BlockRegistry] Registry is frozen, cannot register: ' + name); return _nameToId.get(name) || id; }
-      if (typeof id !== 'number' || id < 0 || id > 255) { console.error('[BlockRegistry] Invalid ID for ' + name + ': ' + id); return id; }
-      _nameToId.set(name, id);
-      _idToName.set(id, name);
-      return id;
-    },
-
-    /**
-     * Get stable ID for a block name.
-     */
-    getId: function(name) { return _nameToId.get(name); },
-
-    /**
-     * Get block name for an ID.
-     */
-    getName: function(id) { return _idToName.get(id); },
-
-    /**
-     * Freeze the registry (no more registrations allowed).
-     */
-    freeze: function() { _frozen = true; },
-
-    /**
-     * Build a palette mapping (name -> id) for embedding in save header.
-     * This allows old saves to be remapped if IDs ever change.
-     */
-    buildPalette: function() {
-      const palette = {};
-      _nameToId.forEach(function(id, name) { palette[name] = id; });
-      return palette;
-    },
-
-    /**
-     * Apply a palette from a save file, returning a remap function.
-     * If the save used different IDs, the remap function translates old -> new.
-     * @param {Object} savedPalette - {name: oldId} from save header
-     * @returns {Function|null} remapFn(oldId) -> newId, or null if no remapping needed
-     */
-    applyPalette: function(savedPalette) {
-      if (!savedPalette || typeof savedPalette !== 'object') return null;
-      const remap = {};
-      let needsRemap = false;
-      for (const name in savedPalette) {
-        const oldId = savedPalette[name];
-        const currentId = _nameToId.get(name);
-        if (typeof currentId === 'number' && oldId !== currentId) {
-          remap[oldId] = currentId;
-          needsRemap = true;
-        }
-      }
-      if (!needsRemap) return null;
-      return function(oldId) {
-        return typeof remap[oldId] === 'number' ? remap[oldId] : oldId;
-      };
-    },
-
-    /**
-     * Get registry stats for debugging.
-     */
-    stats: function() {
-      return { entries: _nameToId.size, frozen: _frozen };
-    }
-  };
-})();
-
 let __tu_rand_idx = 0;
 const __TU_RAND_LUT = new Float32Array(16384);
 for (let i = 0; 16384 > i; i++) __TU_RAND_LUT[i] = Math.random();
@@ -29560,12 +29455,10 @@ window.TU;
             }
           } catch(e){console.warn('[Catch]',e);}
         }
-        // [Phase 4A] Fixed stable IDs from BlockRegistry - eliminates ID drift from allocId() scanning
-        const _BR = window.TU && window.TU.BlockRegistry && window.TU.BlockRegistry.STABLE_IDS;
-        IDS.PUMP_IN || (IDS.PUMP_IN = _BR ? _BR.PUMP_IN : 206);
-        IDS.PUMP_OUT || (IDS.PUMP_OUT = _BR ? _BR.PUMP_OUT : 207);
-        IDS.PLATE_OFF || (IDS.PLATE_OFF = _BR ? _BR.PLATE_OFF : 208);
-        IDS.PLATE_ON || (IDS.PLATE_ON = _BR ? _BR.PLATE_ON : 209);
+        IDS.PUMP_IN || (IDS.PUMP_IN = allocId(206));
+        IDS.PUMP_OUT || (IDS.PUMP_OUT = allocId(1 + (0 | IDS.PUMP_IN)));
+        IDS.PLATE_OFF || (IDS.PLATE_OFF = allocId(1 + (0 | IDS.PUMP_OUT)));
+        IDS.PLATE_ON || (IDS.PLATE_ON = allocId(1 + (0 | IDS.PLATE_OFF)));
         try {
           BD[IDS.PUMP_IN] || (addBlock(IDS.PUMP_IN, {
             name: "泵(入水口)",

@@ -5716,158 +5716,54 @@ window.Events = {
   once: function(event, cb, opts) { return window.GameEvents.once(event, cb, opts); }
 };
 
-// --- Phase 2A: Scoped CanvasOptimizer (replaces global HTMLCanvasElement.prototype.getContext hijack) ---
-// The optimization is now applied ONLY to specific canvases via TU.CanvasOptimizer.optimize(ctx),
-// not globally to every canvas on the page. This prevents interference with minimap, offscreen
-// chunk canvases, Worker OffscreenCanvas, and third-party canvases.
-(function() {
-  const TU = window.TU || (window.TU = {});
-  const _alphaDesc = Object.getOwnPropertyDescriptor(CanvasRenderingContext2D.prototype, "globalAlpha");
-  const _fillDesc = Object.getOwnPropertyDescriptor(CanvasRenderingContext2D.prototype, "fillStyle");
-
-  TU.CanvasOptimizer = {
-    /**
-     * Apply state-caching optimization to a specific 2D canvas context.
-     * Reduces redundant C++ binding calls for globalAlpha and fillStyle.
-     * @param {CanvasRenderingContext2D} ctx - The context to optimize
-     * @returns {CanvasRenderingContext2D} The same context (optimized in-place)
-     */
-    optimize: function(ctx) {
-      if (!ctx || ctx.__tu_optimized) return ctx;
+// --- TU Canvas State Optimizer Injected ---
+!function () {
+  const originalGetContext = HTMLCanvasElement.prototype.getContext;
+  HTMLCanvasElement.prototype.getContext = function (type, options) {
+    const ctx = originalGetContext.call(this, type, options);
+    if ("2d" === type && ctx && !ctx.__tu_optimized) {
       ctx.__tu_optimized = !0;
-      let currentAlpha = 1, currentFill = "#000000";
+      let currentAlpha = 1,
+        currentFill = "#000000";
+      // Override setters to prevent redundant calls to C++ bindings
       Object.defineProperty(ctx, "globalAlpha", {
-        get: function() { return currentAlpha; },
-        set: function(val) {
-          currentAlpha !== val && (currentAlpha = val, _alphaDesc.set.call(this, val));
+        get: function () {
+          return currentAlpha;
+        },
+        set: function (val) {
+          currentAlpha !== val && (currentAlpha = val,
+          // Use internal setter
+          Object.getOwnPropertyDescriptor(CanvasRenderingContext2D.prototype, "globalAlpha").set.call(this, val));
         }
       });
       Object.defineProperty(ctx, "fillStyle", {
-        get: function() { return currentFill; },
-        set: function(val) {
-          currentFill !== val && (currentFill = val, _fillDesc.set.call(this, val));
+        get: function () {
+          return currentFill;
+        },
+        set: function (val) {
+          currentFill !== val && (currentFill = val, Object.getOwnPropertyDescriptor(CanvasRenderingContext2D.prototype, "fillStyle").set.call(this, val));
         }
-      });
-      const origSave = ctx.save, origRestore = ctx.restore, stateStack = [];
-      ctx.save = function() {
-        stateStack.push({ alpha: currentAlpha, fill: currentFill });
+      }); // Intercept save/restore to track state (optional, but complex, leaving alpha/fill is 80% of the gain)
+      const origSave = ctx.save,
+        origRestore = ctx.restore,
+        stateStack = [];
+      ctx.save = function () {
+        stateStack.push({
+          alpha: currentAlpha,
+          fill: currentFill
+        });
         origSave.call(this);
       };
-      ctx.restore = function() {
+      ctx.restore = function () {
         const state = stateStack.pop();
         if (state) { currentAlpha = state.alpha; currentFill = state.fill; }
         origRestore.call(this);
       };
-      return ctx;
     }
+    return ctx;
   };
-})();
+}();
 // ------------------------------------------
-
-// --- Phase 4A: BlockRegistry with stable IDs and palette mapping ---
-(function() {
-  const TU = window.TU || (window.TU = {});
-
-  // Stable ID assignments for all dynamic blocks.
-  // These IDs are FIXED and MUST NOT change across versions to prevent save corruption.
-  const STABLE_IDS = {
-    WIRE_OFF:   200,
-    WIRE_ON:    201,
-    SWITCH_OFF: 202,
-    SWITCH_ON:  203,
-    LAMP_OFF:   204,
-    LAMP_ON:    205,
-    PUMP_IN:    206,
-    PUMP_OUT:   207,
-    PLATE_OFF:  208,
-    PLATE_ON:   209
-  };
-
-  const _nameToId = new Map();
-  const _idToName = new Map();
-  let _frozen = false;
-
-  // Pre-populate with stable IDs
-  for (const name in STABLE_IDS) {
-    _nameToId.set(name, STABLE_IDS[name]);
-    _idToName.set(STABLE_IDS[name], name);
-  }
-
-  TU.BlockRegistry = {
-    STABLE_IDS: STABLE_IDS,
-
-    /**
-     * Register a dynamic block with a stable ID.
-     * @param {string} name - Block name (e.g. 'PUMP_IN')
-     * @param {number} id - Fixed ID (must be from STABLE_IDS)
-     * @returns {number} The assigned ID
-     */
-    register: function(name, id) {
-      if (_frozen) { console.warn('[BlockRegistry] Registry is frozen, cannot register: ' + name); return _nameToId.get(name) || id; }
-      if (typeof id !== 'number' || id < 0 || id > 255) { console.error('[BlockRegistry] Invalid ID for ' + name + ': ' + id); return id; }
-      _nameToId.set(name, id);
-      _idToName.set(id, name);
-      return id;
-    },
-
-    /**
-     * Get stable ID for a block name.
-     */
-    getId: function(name) { return _nameToId.get(name); },
-
-    /**
-     * Get block name for an ID.
-     */
-    getName: function(id) { return _idToName.get(id); },
-
-    /**
-     * Freeze the registry (no more registrations allowed).
-     */
-    freeze: function() { _frozen = true; },
-
-    /**
-     * Build a palette mapping (name -> id) for embedding in save header.
-     * This allows old saves to be remapped if IDs ever change.
-     */
-    buildPalette: function() {
-      const palette = {};
-      _nameToId.forEach(function(id, name) { palette[name] = id; });
-      return palette;
-    },
-
-    /**
-     * Apply a palette from a save file, returning a remap function.
-     * If the save used different IDs, the remap function translates old -> new.
-     * @param {Object} savedPalette - {name: oldId} from save header
-     * @returns {Function|null} remapFn(oldId) -> newId, or null if no remapping needed
-     */
-    applyPalette: function(savedPalette) {
-      if (!savedPalette || typeof savedPalette !== 'object') return null;
-      const remap = {};
-      let needsRemap = false;
-      for (const name in savedPalette) {
-        const oldId = savedPalette[name];
-        const currentId = _nameToId.get(name);
-        if (typeof currentId === 'number' && oldId !== currentId) {
-          remap[oldId] = currentId;
-          needsRemap = true;
-        }
-      }
-      if (!needsRemap) return null;
-      return function(oldId) {
-        return typeof remap[oldId] === 'number' ? remap[oldId] : oldId;
-      };
-    },
-
-    /**
-     * Get registry stats for debugging.
-     */
-    stats: function() {
-      return { entries: _nameToId.size, frozen: _frozen };
-    }
-  };
-})();
-
 let __tu_rand_idx = 0;
 const __TU_RAND_LUT = new Float32Array(16384);
 for (let i = 0; 16384 > i; i++) __TU_RAND_LUT[i] = Math.random();
@@ -18903,10 +18799,6 @@ class Renderer {
       this.ctx || (this.ctx = canvas.getContext("2d", {
         alpha: !1
       }));
-      // Phase 2A: Apply scoped canvas state optimization to game canvas only
-      if (this.ctx && window.TU && window.TU.CanvasOptimizer) {
-        window.TU.CanvasOptimizer.optimize(this.ctx);
-      }
       this.ctx.imageSmoothingEnabled = !1;
     }
     window.GameEvents.on('block:written', e => this.invalidateTile(e.x, e.y));
@@ -23479,34 +23371,6 @@ class InputManager {
       const fm = window.TU && window.TU.FullscreenManager;
       fm && "function" == typeof fm.toggle ? fm.toggle() : document.fullscreenElement ? document.exitFullscreen() : (document.documentElement).requestFullscreen();
     });
-    // --- Phase 1A: Input safety handlers (absorbed from __tuInputSafety patch) ---
-    const resetMouseButtons = () => {
-      game && game.input && (window.GameEvents.emit('input:set', 'mouseLeft', false), window.GameEvents.emit('input:set', 'mouseRight', false));
-    };
-    const resetAll = () => {
-      game && game.input && (window.GameEvents.emit('input:set', 'left', false), window.GameEvents.emit('input:set', 'right', false), window.GameEvents.emit('input:set', 'jump', false), window.GameEvents.emit('input:set', 'sprint', false));
-      resetMouseButtons();
-    };
-    // Window blur/tab switch: avoid "stuck key/button"
-    window.addEventListener("blur", resetAll, { passive: !0 });
-    document.addEventListener("visibilitychange", () => { document.hidden && resetAll(); }, { passive: !0 });
-    // Mouse leaves canvas: clear mouse buttons to avoid "stuck mining/placing"
-    canvas && canvas.addEventListener("mouseleave", resetMouseButtons, { passive: !0 });
-    // Mouse up anywhere: clear buttons even if released outside canvas
-    window.addEventListener("mouseup", resetMouseButtons, { passive: !0 });
-    // Wheel: scroll hotbar slots
-    canvas && !canvas.__tuWheelBound && (canvas.__tuWheelBound = !0, canvas.addEventListener("wheel", e => {
-      if (e.ctrlKey) return; // allow browser zoom / trackpad pinch
-      const g = window.AppServices.get("game");
-      const ui = window.AppServices.get("ui");
-      if (!g || !ui || !g.player) return;
-      if (window.AppServices.get("uiState") && window.AppServices.get("uiState").isAnyOpen() || g._inputBlocked) return;
-      const dx = +e.deltaX || 0, dy = +e.deltaY || 0, delta = (0 > dx ? -dx : dx) > (0 > dy ? -dy : dy) ? dx : dy;
-      if (!delta || 1 > (0 > delta ? -delta : delta)) return;
-      e.preventDefault();
-      const dir = delta > 0 ? 1 : -1, next = ((0 | (Number.isFinite(g.player.selectedSlot) ? g.player.selectedSlot : 0)) + dir + 9) % 9;
-      try { window.GameEvents && window.GameEvents.emit && window.GameEvents.emit("ui:selectSlot", next); } catch(e){console.warn('[Catch]',e);}
-    }, { passive: !1 }));
   }
   /**
    * Fixed-step tick to compute "hold A/D to sprint" without being affected by key repeat.
@@ -29357,10 +29221,7 @@ window.TU;
           Game = TU.Game,
           InputManager = TU.InputManager,
           AudioManager = TU.AudioManager;
-        // [Phase 1D] __tuGameReadyEvent patch DISABLED - was causing duplicate game:init:post emission.
-        // The canonical emission is in Game.init() at the end of initialization.
-        // All listeners (tileLogic, machines, worker, acid rain) use the single canonical event.
-        if (false && Game && Game.prototype && !Game.prototype.__tuGameReadyEvent) {
+        if (Game && Game.prototype && !Game.prototype.__tuGameReadyEvent) {
           Game.prototype.__tuGameReadyEvent = !0;
           const _init = Game.prototype.init;
           "function" == typeof _init && (Game.prototype.init = async function (...args) {
@@ -29371,8 +29232,7 @@ window.TU;
             return r;
           });
         }
-        // [Phase 1A] __tuInputSafety patch REMOVED - logic absorbed into InputManager.bind() native class
-        if (false && InputManager && InputManager.prototype && !InputManager.prototype.__tuInputSafety) {
+        if (InputManager && InputManager.prototype && !InputManager.prototype.__tuInputSafety) {
           InputManager.prototype.__tuInputSafety = !0;
           const _bind = InputManager.prototype.bind;
           InputManager.prototype.bind = function (...args) {
@@ -29560,12 +29420,10 @@ window.TU;
             }
           } catch(e){console.warn('[Catch]',e);}
         }
-        // [Phase 4A] Fixed stable IDs from BlockRegistry - eliminates ID drift from allocId() scanning
-        const _BR = window.TU && window.TU.BlockRegistry && window.TU.BlockRegistry.STABLE_IDS;
-        IDS.PUMP_IN || (IDS.PUMP_IN = _BR ? _BR.PUMP_IN : 206);
-        IDS.PUMP_OUT || (IDS.PUMP_OUT = _BR ? _BR.PUMP_OUT : 207);
-        IDS.PLATE_OFF || (IDS.PLATE_OFF = _BR ? _BR.PLATE_OFF : 208);
-        IDS.PLATE_ON || (IDS.PLATE_ON = _BR ? _BR.PLATE_ON : 209);
+        IDS.PUMP_IN || (IDS.PUMP_IN = allocId(206));
+        IDS.PUMP_OUT || (IDS.PUMP_OUT = allocId(1 + (0 | IDS.PUMP_IN)));
+        IDS.PLATE_OFF || (IDS.PLATE_OFF = allocId(1 + (0 | IDS.PUMP_OUT)));
+        IDS.PLATE_ON || (IDS.PLATE_ON = allocId(1 + (0 | IDS.PLATE_OFF)));
         try {
           BD[IDS.PUMP_IN] || (addBlock(IDS.PUMP_IN, {
             name: "泵(入水口)",
