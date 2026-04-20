@@ -4978,353 +4978,35 @@ window.TU = window.TU || {};
     return c(tag, err);
   }
 
-  // --- Phase 0A: Enhanced error handling with categorization ---
-  const SEVERITY = { FATAL: 'fatal', ERROR: 'error', WARN: 'warn', INFO: 'info' };
-  const CATEGORY = {
-    SAVE: 'save',        // IDB/LS write failures
-    WORKER: 'worker',    // Web Worker hangs/crashes
-    AUDIO: 'audio',      // AudioContext failures
-    RENDER: 'render',    // Canvas/WebGL errors
-    NETWORK: 'network',  // Multiplayer/fetch errors
-    LOGIC: 'logic',      // Game logic errors
-    UNKNOWN: 'unknown'
-  };
-
-  function _categorize(tag, error) {
-    const t = (tag || '').toLowerCase();
-    const m = (error && error.message || '').toLowerCase();
-    if (t.includes('save') || t.includes('idb') || t.includes('storage') || m.includes('quota')) return CATEGORY.SAVE;
-    if (t.includes('worker') || m.includes('worker')) return CATEGORY.WORKER;
-    if (t.includes('audio') || m.includes('audiocontext') || m.includes('decodeaudiodata')) return CATEGORY.AUDIO;
-    if (t.includes('render') || t.includes('canvas') || m.includes('bindtexture') || m.includes('bindframebuffer')) return CATEGORY.RENDER;
-    if (t.includes('mp') || t.includes('network') || t.includes('rtc') || m.includes('ice')) return CATEGORY.NETWORK;
-    if (t.includes('logic') || t.includes('tile') || t.includes('block')) return CATEGORY.LOGIC;
-    return CATEGORY.UNKNOWN;
-  }
-
-  function _buildEntry(tag, error, opts) {
-    const o = opts || {};
-    const category = o.category || _categorize(tag, error);
-    return {
-      tag: tag || 'unknown',
-      error: error,
-      message: error && error.message || String(error),
-      stack: error && error.stack || null,
-      category: category,
-      severity: o.severity || SEVERITY.ERROR,
-      at: Date.now()
-    };
-  }
-
   function run(tag, fn, opts) {
     try {
       return fn();
     } catch (e) {
       const o = opts || {};
       const level = o.level || "error";
-      const entry = _buildEntry(tag, e, o);
+      const entry = { tag: tag || "unknown", error: e, at: Date.now() };
       errors.push(entry);
       errors.length > maxErrors && errors.splice(0, errors.length - maxErrors);
       try {
-        log(level, '[TU.Safe:' + entry.category + '] ' + tag, e);
-      } catch (_logErr) {
-        try { console.error('[TU.Safe] logging failed:', _logErr); } catch(_) {}
-      }
+        log(level, tag, e);
+      } catch(e){console.warn('[Catch]',e);}
       if (o.toastMessage) toast(o.toastMessage, o.toastMs, o.toastKey || tag, o.cooldownMs);
       if (o.rethrow) throw e;
       return o.fallback;
     }
   }
-
-  // runAsync: properly handles async/Promise rejections (Phase 0A addition)
-  async function runAsync(tag, asyncFn, opts) {
-    try {
-      return await asyncFn();
-    } catch (e) {
-      const o = opts || {};
-      const level = o.level || "error";
-      const entry = _buildEntry(tag, e, o);
-      errors.push(entry);
-      errors.length > maxErrors && errors.splice(0, errors.length - maxErrors);
-      try {
-        log(level, '[TU.Safe.async:' + entry.category + '] ' + tag, e);
-      } catch (_logErr) {
-        try { console.error('[TU.Safe] async logging failed:', _logErr); } catch(_) {}
-      }
-      if (o.toastMessage) toast(o.toastMessage, o.toastMs, o.toastKey || tag, o.cooldownMs);
-      if (o.rethrow) throw e;
-      return o.fallback;
-    }
-  }
-
-  // GlobalErrorBoundary: tracks error counts by category, surfaces fatal conditions
-  const errorBoundary = {
-    counts: Object.create(null),
-    fatalCategories: new Set(),
-    thresholds: { save: 3, worker: 2, audio: 10, render: 5, network: 20, logic: 8, unknown: 15 },
-    record: function(entry) {
-      const cat = entry.category || CATEGORY.UNKNOWN;
-      this.counts[cat] = (this.counts[cat] || 0) + 1;
-      const threshold = this.thresholds[cat] || 15;
-      if (this.counts[cat] >= threshold && !this.fatalCategories.has(cat)) {
-        this.fatalCategories.add(cat);
-        try {
-          console.error('[GlobalErrorBoundary] FATAL threshold reached for category: ' + cat + ' (' + this.counts[cat] + '/' + threshold + ')');
-          window.GameEvents && window.GameEvents.emit && window.GameEvents.emit('error:categoryFatal', { category: cat, count: this.counts[cat] });
-        } catch(_) {}
-      }
-    },
-    isFatal: function(category) { return this.fatalCategories.has(category); },
-    reset: function(category) {
-      if (category) { this.counts[category] = 0; this.fatalCategories.delete(category); }
-      else { for (const k in this.counts) this.counts[k] = 0; this.fatalCategories.clear(); }
-    },
-    stats: function() {
-      return { counts: Object.assign({}, this.counts), fatal: Array.from(this.fatalCategories) };
-    }
-  };
 
   TU.Safe = {
     run,
-    runAsync,
     toast,
     shouldFire,
-    errors,
-    SEVERITY,
-    CATEGORY,
-    errorBoundary,
-    _categorize
+    errors
   };
 })();
 document.getElementById('error-toggle')?.addEventListener('click', function() {
   var el = document.getElementById('error-stack');
   el && el.classList.toggle('show');
 });
-
-// --- Phase 0B: Patch Ledger ---
-// Comprehensive manifest of all monkey patches, their targets, purposes, and migration strategy.
-// Strategy codes: ABSORB = merge into native class | EVENT = convert to event listener | PIPELINE = flatten into pipeline | KEEP = leave as-is
-(function() {
-  const TU = window.TU || (window.TU = {});
-  const STRATEGY = { ABSORB: 'absorb', EVENT: 'event', PIPELINE: 'pipeline', KEEP: 'keep' };
-  const ledger = [
-    { id: '__tuWorldApiInstalled',          target: 'World',                   method: 'getTile/setTile/etc',       purpose: 'World API convenience methods',                strategy: STRATEGY.ABSORB },
-    { id: '__idbPatchInstalled',            target: 'SaveSystem',              method: 'clear/promptStartIfNeeded/save', purpose: 'IndexedDB save fallback',                  strategy: STRATEGY.ABSORB },
-    { id: '__chunkBatchSafeInstalled',      target: 'Renderer.prototype',      method: 'chunk batching methods',    purpose: 'Chunk-based tile rendering optimization',      strategy: STRATEGY.KEEP },
-    { id: '__tileLogicInstalled',           target: 'TU',                      method: 'TileLogicEngine setup',     purpose: 'Wire/fluid/logic tile simulation',             strategy: STRATEGY.EVENT },
-    { id: '__logicLifecycleInstalled',      target: 'Game.prototype',          method: 'game:init:post listener',   purpose: 'TileLogic lifecycle hooks',                    strategy: STRATEGY.EVENT },
-    { id: '__logicMarkTilePatched',         target: 'SaveSystem.prototype',    method: 'markTile',                  purpose: 'Notify TileLogicEngine on tile changes',       strategy: STRATEGY.EVENT },
-    { id: '__logicInteractPatched',         target: 'Game.prototype',          method: '_handleInteraction',        purpose: 'Switch interaction for logic blocks',          strategy: STRATEGY.EVENT },
-    { id: '__rainSynthInstalled',           target: 'AudioManager.prototype',  method: 'rain synth methods',        purpose: 'WebAudio rain synthesis',                      strategy: STRATEGY.ABSORB },
-    { id: '__weatherPostTintInstalled',     target: 'Renderer.prototype',      method: 'applyPostFX',              purpose: 'Weather color tint overlay',                    strategy: STRATEGY.PIPELINE },
-    { id: '__weatherPostTintOptimized',     target: 'Renderer.prototype',      method: 'applyPostFX',              purpose: 'Optimized weather tint (layer 3)',              strategy: STRATEGY.PIPELINE },
-    { id: '__weatherCanvasFxRenderInstalled', target: 'Game.prototype',        method: 'render post hook',          purpose: 'Weather canvas FX in render loop',             strategy: STRATEGY.EVENT },
-    { id: '__weatherCanvasFxPostTint',      target: 'Game.prototype',          method: '_updateWeather',            purpose: 'Weather update post-tint sync',                strategy: STRATEGY.EVENT },
-    { id: '__tuInputSafety',               target: 'InputManager.prototype',   method: 'bind',                     purpose: 'Blur/focus/wheel input safety',                strategy: STRATEGY.ABSORB },
-    { id: '__tuLowPowerCssHook',           target: 'Game.prototype',           method: 'CSS class toggle',          purpose: 'Low-power mode CSS body class',                strategy: STRATEGY.ABSORB },
-    { id: '__tuAudioVisPatch',             target: 'AudioManager.prototype',   method: 'updateWeatherAmbience',     purpose: 'Fix missing enabled property',                 strategy: STRATEGY.ABSORB },
-    { id: '__tuGameReadyEvent',            target: 'Game.prototype',           method: 'init',                      purpose: 'Emit game:init:post (DUPLICATE)',               strategy: STRATEGY.EVENT },
-    { id: '__chestLootInstalled',          target: 'Game.prototype',           method: '_rollChestLoot',            purpose: 'Treasure chest loot generation',                strategy: STRATEGY.ABSORB },
-    { id: '__workerInstalled',             target: 'TileLogicEngine',          method: '_workerSource',             purpose: 'TileLogic Worker source builder',               strategy: STRATEGY.KEEP },
-    { id: '__underwaterFogInstalled',      target: 'Renderer.prototype',       method: 'applyPostFX',              purpose: 'Underwater fog effect (layer 4)',               strategy: STRATEGY.PIPELINE },
-    { id: '__cloudBiomeSkyInstalled',      target: 'Renderer.prototype',       method: 'renderSky/_ensureClouds',   purpose: 'Biome-aware sky + cloud rendering',            strategy: STRATEGY.ABSORB },
-    { id: '__machinesInstalled',           target: 'Game.prototype',           method: '_indexMachines/_syncMachineAt', purpose: 'Pump/plate machine system',                 strategy: STRATEGY.EVENT },
-    { id: '__tuPlateGcOptInstalled',       target: 'Game.prototype',           method: 'pressure plate GC',         purpose: 'Pressure plate collision optimization',        strategy: STRATEGY.EVENT },
-    { id: '__tuPumpGcOptInstalled',        target: 'Game.prototype',           method: 'pump GC',                   purpose: 'Pump simulation optimization',                 strategy: STRATEGY.EVENT },
-    { id: '__machineIndexPatched',         target: 'SaveSystem.prototype',     method: 'markTile',                  purpose: 'Machine index sync on tile change',            strategy: STRATEGY.EVENT },
-    { id: '__caveReverbInstalled',         target: 'AudioManager.prototype',   method: 'cave reverb methods',       purpose: 'Cave reverb audio FX',                         strategy: STRATEGY.ABSORB },
-    { id: '__tuPoolInstalled',             target: 'Toast',                    method: 'Toast pooling',             purpose: 'Toast DOM element pooling',                     strategy: STRATEGY.ABSORB },
-    { id: '__logicDropPatch',              target: 'DroppedItemManager.prototype', method: 'spawn',                 purpose: 'Normalize wire/switch/lamp drops',             strategy: STRATEGY.ABSORB },
-    { id: '__logicDropNormalize',          target: 'DroppedItemManager.prototype', method: 'spawn',                 purpose: 'Second drop normalization layer',              strategy: STRATEGY.ABSORB },
-    { id: '__mineHooked',                  target: 'WorldGenerator.prototype', method: '_structures',               purpose: 'Multi-layer mine generation hook',             strategy: STRATEGY.ABSORB },
-    { id: '__tuAcidRainWeatherLogic',      target: 'Game.prototype',           method: '_updateWeather',            purpose: 'Acid rain weather type',                       strategy: STRATEGY.EVENT },
-    { id: '__tuAcidRainSpawnPoint',        target: 'Game.prototype',           method: 'init',                      purpose: 'Store spawn point for acid rain respawn',      strategy: STRATEGY.ABSORB },
-    { id: '__tuAcidRainDamageTick',        target: 'Game.prototype',           method: 'game:update listener',      purpose: 'Acid rain player damage tick',                 strategy: STRATEGY.EVENT },
-    { id: '__tuAcidRainGreen',             target: 'WeatherCanvasFX.prototype', method: 'acid rain visuals',        purpose: 'Green acid rain pattern rendering',            strategy: STRATEGY.ABSORB },
-    { id: 'canvasGetContextHijack',        target: 'HTMLCanvasElement.prototype', method: 'getContext',             purpose: 'Global canvas state optimizer',                strategy: STRATEGY.ABSORB },
-    { id: 'renderSkyOverride',             target: 'Renderer.prototype',       method: 'renderSky',                purpose: 'Optimized sky rendering',                      strategy: STRATEGY.ABSORB },
-    { id: 'renderParallaxOverride',        target: 'Renderer.prototype',       method: 'renderParallax',           purpose: 'Optimized parallax mountains',                 strategy: STRATEGY.ABSORB },
-    { id: 'applyPostFXOverride',           target: 'Renderer.prototype',       method: 'applyPostFX',              purpose: 'Film grain + vignette (layer 1)',              strategy: STRATEGY.PIPELINE },
-    { id: 'gameRenderOverride',            target: 'Game.prototype',           method: 'render',                    purpose: 'Full render loop override',                    strategy: STRATEGY.ABSORB },
-    { id: 'saveSystemSaveOverride',        target: 'SaveSystem.prototype',     method: 'save',                      purpose: 'IDB + degradation save logic',                strategy: STRATEGY.ABSORB },
-    { id: 'touchControllerInit',           target: 'TouchController.prototype', method: '_init/_updateJoystick',    purpose: 'Mobile touch controls',                        strategy: STRATEGY.ABSORB },
-    { id: 'rendererResizeOverride',        target: 'Renderer.prototype',       method: 'resize',                    purpose: 'Star array regeneration on resize',            strategy: STRATEGY.ABSORB }
-  ];
-  const byStrategy = { absorb: [], event: [], pipeline: [], keep: [] };
-  for (let i = 0; i < ledger.length; i++) {
-    const s = ledger[i].strategy;
-    if (byStrategy[s]) byStrategy[s].push(ledger[i].id);
-  }
-  TU.PatchLedger = {
-    STRATEGY: STRATEGY,
-    entries: ledger,
-    byStrategy: byStrategy,
-    find: function(id) { for (let i = 0; i < ledger.length; i++) if (ledger[i].id === id) return ledger[i]; return null; },
-    stats: function() {
-      return { total: ledger.length, absorb: byStrategy.absorb.length, event: byStrategy.event.length, pipeline: byStrategy.pipeline.length, keep: byStrategy.keep.length };
-    }
-  };
-})();
-
-// --- Phase 0C: Performance Profiler with ring buffer for frame/tick baselines ---
-(function() {
-  const TU = window.TU || (window.TU = {});
-  const RING_SIZE = 600; // ~10 seconds at 60fps
-
-  function RingBuffer(size) {
-    this._buf = new Float64Array(size);
-    this._head = 0;
-    this._count = 0;
-    this._size = size;
-  }
-  RingBuffer.prototype.push = function(v) {
-    this._buf[this._head] = v;
-    this._head = (this._head + 1) % this._size;
-    if (this._count < this._size) this._count++;
-  };
-  RingBuffer.prototype.percentile = function(p) {
-    if (this._count === 0) return 0;
-    // Copy active values and sort
-    const n = this._count;
-    const arr = new Float64Array(n);
-    const start = this._count < this._size ? 0 : this._head;
-    for (let i = 0; i < n; i++) arr[i] = this._buf[(start + i) % this._size];
-    arr.sort();
-    const idx = Math.min(n - 1, Math.floor(p / 100 * n));
-    return arr[idx];
-  };
-  RingBuffer.prototype.mean = function() {
-    if (this._count === 0) return 0;
-    let sum = 0;
-    const start = this._count < this._size ? 0 : this._head;
-    for (let i = 0; i < this._count; i++) sum += this._buf[(start + i) % this._size];
-    return sum / this._count;
-  };
-  RingBuffer.prototype.count = function() { return this._count; };
-
-  const Profiler = {
-    enabled: true,
-    _frameRing: new RingBuffer(RING_SIZE),
-    _tickRing: new RingBuffer(RING_SIZE),
-    _renderRing: new RingBuffer(RING_SIZE),
-    _lastFrameStart: 0,
-    _baselineSnapshot: null,
-
-    // Call at start of each RAF callback
-    frameStart: function() {
-      this._lastFrameStart = performance.now();
-    },
-
-    // Call at end of each RAF callback
-    frameEnd: function() {
-      if (!this.enabled || !this._lastFrameStart) return;
-      const dt = performance.now() - this._lastFrameStart;
-      this._frameRing.push(dt);
-    },
-
-    // Call around game.update()
-    tickStart: function() { this._tickStart = performance.now(); },
-    tickEnd: function() {
-      if (!this.enabled || !this._tickStart) return;
-      this._tickRing.push(performance.now() - this._tickStart);
-    },
-
-    // Call around game.render()
-    renderStart: function() { this._renderStart = performance.now(); },
-    renderEnd: function() {
-      if (!this.enabled || !this._renderStart) return;
-      this._renderRing.push(performance.now() - this._renderStart);
-    },
-
-    // Get current performance statistics
-    stats: function() {
-      return {
-        frame: {
-          p50: this._frameRing.percentile(50),
-          p95: this._frameRing.percentile(95),
-          p99: this._frameRing.percentile(99),
-          mean: this._frameRing.mean(),
-          samples: this._frameRing.count()
-        },
-        tick: {
-          p50: this._tickRing.percentile(50),
-          p95: this._tickRing.percentile(95),
-          p99: this._tickRing.percentile(99),
-          mean: this._tickRing.mean(),
-          samples: this._tickRing.count()
-        },
-        render: {
-          p50: this._renderRing.percentile(50),
-          p95: this._renderRing.percentile(95),
-          p99: this._renderRing.percentile(99),
-          mean: this._renderRing.mean(),
-          samples: this._renderRing.count()
-        }
-      };
-    },
-
-    // Take a baseline snapshot for later comparison
-    snapshot: function(label) {
-      const s = this.stats();
-      s.label = label || 'baseline';
-      s.at = Date.now();
-      this._baselineSnapshot = s;
-      console.log('[TU.Profiler] Baseline snapshot "' + s.label + '":', JSON.stringify(s, null, 2));
-      return s;
-    },
-
-    // Compare current stats against the baseline
-    compare: function() {
-      if (!this._baselineSnapshot) return null;
-      const cur = this.stats();
-      const base = this._baselineSnapshot;
-      const diff = function(a, b) { return b > 0 ? ((a - b) / b * 100).toFixed(1) + '%' : 'N/A'; };
-      return {
-        baseline: base.label,
-        frame: { p95_delta: diff(cur.frame.p95, base.frame.p95), p99_delta: diff(cur.frame.p99, base.frame.p99) },
-        tick: { p95_delta: diff(cur.tick.p95, base.tick.p95), p99_delta: diff(cur.tick.p99, base.tick.p99) },
-        render: { p95_delta: diff(cur.render.p95, base.render.p95), p99_delta: diff(cur.render.p99, base.render.p99) }
-      };
-    }
-  };
-
-  TU.Profiler = Profiler;
-
-  // Auto-hook into game lifecycle via GameEvents when available
-  if (window.GameEvents && window.GameEvents.on) {
-    window.GameEvents.on('game:raf:start', function() { Profiler.frameStart(); });
-    window.GameEvents.on('game:update:pre', function() { Profiler.tickStart(); });
-    window.GameEvents.on('game:update:post', function() { Profiler.tickEnd(); });
-    window.GameEvents.on('game:render:pre', function() { Profiler.renderStart(); });
-    window.GameEvents.on('game:render:post', function() { Profiler.renderEnd(); Profiler.frameEnd(); });
-  }
-  // Deferred hook: if GameEvents not yet available, hook when it appears
-  if (!window.GameEvents) {
-    const _checkInterval = setInterval(function() {
-      if (window.GameEvents && window.GameEvents.on) {
-        clearInterval(_checkInterval);
-        window.GameEvents.on('game:raf:start', function() { Profiler.frameStart(); });
-        window.GameEvents.on('game:update:pre', function() { Profiler.tickStart(); });
-        window.GameEvents.on('game:update:post', function() { Profiler.tickEnd(); });
-        window.GameEvents.on('game:render:pre', function() { Profiler.renderStart(); });
-        window.GameEvents.on('game:render:post', function() { Profiler.renderEnd(); Profiler.frameEnd(); });
-      }
-    }, 100);
-    // Auto-cleanup after 30s if GameEvents never appears
-    setTimeout(function() { clearInterval(_checkInterval); }, 30000);
-  }
-
-  // Auto-take baseline snapshot after 10 seconds of gameplay
-  if (window.GameEvents && window.GameEvents.on) {
-    window.GameEvents.once('game:init:post', function() {
-      setTimeout(function() {
-        if (Profiler._frameRing.count() > 100) {
-          Profiler.snapshot('phase0_baseline');
-        }
-      }, 10000);
-    });
-  }
-})();
 
 </script>
   <script>
@@ -5821,45 +5503,25 @@ const TU_PERF = "undefined" != typeof performance && performance && "function" =
     });
   }
   global.onerror = function (msg, url, line, col, error) {
-    global.__TU_ERROR_COUNT__++;
-    const err = error || Error(msg);
-    reportOrQueue(err, {
+    return global.__TU_ERROR_COUNT__++, reportOrQueue(error || Error(msg), {
       phase: "runtime",
       source: "window.onerror",
       url: url,
       line: line,
       col: col
-    });
-    // Phase 0A: Wire into GlobalErrorBoundary for category-aware tracking
-    try {
-      const safe = global.TU && global.TU.Safe;
-      if (safe && safe.errorBoundary) {
-        const entry = { tag: 'window.onerror', error: err, message: msg, category: safe.CATEGORY ? safe.CATEGORY.UNKNOWN : 'unknown', severity: 'error', at: Date.now() };
-        safe.errorBoundary.record(entry);
-      }
-    } catch(_) {}
-    if (global.__TU_ERROR_COUNT__ > global.__TU_MAX_ERRORS__) {
-      global.__TU_FATAL_ERROR__ = !0;
-      global.GameEvents && global.GameEvents.emit && global.GameEvents.emit("fatal:error", { msg: msg, url: url, line: line, col: col });
-    }
-    return !1;
+    }), global.__TU_ERROR_COUNT__ > global.__TU_MAX_ERRORS__ && (global.__TU_FATAL_ERROR__ = !0, global.GameEvents && global.GameEvents.emit && global.GameEvents.emit("fatal:error", {
+      msg: msg,
+      url: url,
+      line: line,
+      col: col
+    })), !1;
   };
   global.addEventListener("unhandledrejection", function (event) {
     global.__TU_ERROR_COUNT__++;
-    const err = event.reason || Error("Unhandled rejection");
-    reportOrQueue(err, {
+    reportOrQueue(event.reason || Error("Unhandled rejection"), {
       phase: "runtime",
       source: "unhandledrejection"
     });
-    // Phase 0A: Wire into GlobalErrorBoundary - unhandled rejections are often Worker/IDB/audio issues
-    try {
-      const safe = global.TU && global.TU.Safe;
-      if (safe && safe.errorBoundary) {
-        const cat = safe._categorize ? safe._categorize('unhandledrejection', err) : 'unknown';
-        const entry = { tag: 'unhandledrejection', error: err, message: err && err.message || String(err), category: cat, severity: 'error', at: Date.now() };
-        safe.errorBoundary.record(entry);
-      }
-    } catch(_) {}
   });
   const ErrorReporter = {
       _errors: [],
